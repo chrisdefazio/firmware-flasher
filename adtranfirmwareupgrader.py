@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import csv
 from datetime import datetime
 from simple_term_menu import TerminalMenu
+from paramiko.ssh_exception import NoValidConnectionsError
 
 from network_utils import (
     drain_tty_input,
@@ -63,16 +64,77 @@ def clear_ssh_key(ip):
         run_command(f"ssh-keygen -R {ip}")
         print(f"Cleared SSH key for {ip}")
 
-def get_ssh_credentials(ip):
-    """Determine which SSH credentials to use based on IP address"""
-    if ip.startswith("172.16.192."):
-        print("Using upgraded firmware credentials (172.16.192.x IP range)")
-        return os.getenv('UPGRADED_USERNAME'), os.getenv('UPGRADED_PASSWORD')
-    else:
-        print("Using initial firmware credentials")
-        return os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD')
+def mask_secret(secret):
+    """Mask a secret for safe console output."""
+    if not secret:
+        return "<empty>"
+    if len(secret) <= 2:
+        return "*" * len(secret)
+    return f"{secret[:2]}{'*' * (len(secret) - 2)}"
 
-def ssh_connect_with_shell(ip, username=None, password=None, timeout=10, prompt_on_fail=False):
+def test_ssh_port_reachability(ip, port=22, timeout=5, source_ip=None):
+    """Preflight check to distinguish TCP reachability issues from SSH auth failures."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        if source_ip:
+            sock.bind((source_ip, 0))
+        sock.connect((ip, port))
+        with sock:
+            local_host, local_port = sock.getsockname()
+            print(
+                f"TCP preflight succeeded: local {local_host}:{local_port} -> {ip}:{port}"
+            )
+            return True, "ok"
+    except socket.timeout:
+        return False, f"tcp_timeout: unable to reach {ip}:{port} within {timeout}s"
+    except ConnectionRefusedError:
+        return False, f"tcp_refused: {ip}:{port} refused the connection"
+    except OSError as err:
+        errno_text = f" errno={err.errno}" if getattr(err, "errno", None) is not None else ""
+        return False, f"tcp_os_error:{errno_text} {err}"
+
+def get_ssh_credential_candidates(ip, username=None, password=None):
+    """Build SSH credential candidates and validate non-empty values."""
+    if username is not None or password is not None:
+        explicit_user = username or ""
+        explicit_password = password or ""
+        if not explicit_user or not explicit_password:
+            print("Provided SSH credentials are incomplete. Username and password are both required.")
+            return []
+        return [(explicit_user, explicit_password, "provided credentials")]
+
+    initial_user = os.getenv("INITIAL_USERNAME") or ""
+    initial_password = os.getenv("INITIAL_PASSWORD") or ""
+    upgraded_user = os.getenv("UPGRADED_USERNAME") or ""
+    upgraded_password = os.getenv("UPGRADED_PASSWORD") or ""
+
+    candidates = []
+    seen = set()
+
+    def add_candidate(user, pwd, label):
+        if not user or not pwd:
+            return
+        key = (user, pwd)
+        if key not in seen:
+            candidates.append((user, pwd, label))
+            seen.add(key)
+
+    if ip.startswith("172.16.192."):
+        print("Using upgraded firmware credentials first (172.16.192.x IP range)")
+        add_candidate(upgraded_user, upgraded_password, "upgraded")
+        add_candidate(initial_user, initial_password, "initial fallback")
+    else:
+        print("Using initial firmware credentials first")
+        add_candidate(initial_user, initial_password, "initial")
+        add_candidate(upgraded_user, upgraded_password, "upgraded fallback")
+
+    if not candidates:
+        print("No valid SSH credentials found in environment.")
+        print("Set INITIAL_USERNAME/INITIAL_PASSWORD and/or UPGRADED_USERNAME/UPGRADED_PASSWORD in .env")
+    return candidates
+
+def ssh_connect_with_shell(ip, username=None, password=None, timeout=10, prompt_on_fail=False, source_ip=None):
     """Connect to device via SSH and return client and channel
     
     Args:
@@ -81,54 +143,91 @@ def ssh_connect_with_shell(ip, username=None, password=None, timeout=10, prompt_
         password: SSH password (if None, will be determined from IP)
         timeout: Connection timeout in seconds
         prompt_on_fail: If True, prompt user for manual credentials on auth failure
+        source_ip: Optional local source IP to bind before connecting
     """
     print(f"Connecting to {ip} via SSH...")
-    
-    # If credentials not provided, determine them based on IP
-    if username is None or password is None:
-        username, password = get_ssh_credentials(ip)
-    
-    print(f"Using username: '{username}'")
-    print(f"Using password: '{password[:2]}{'*' * (len(password) - 2) if password and len(password) > 2 else ''}'")
-    
-    # Create SSH client
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    
-    # Handler for keyboard-interactive authentication
-    def kbd_interactive_handler(title, instructions, prompt_list):
-        """Handle keyboard-interactive authentication prompts"""
-        responses = []
-        for prompt, echo in prompt_list:
-            if 'password' in prompt.lower():
-                responses.append(password)
+    if source_ip:
+        print(f"Binding SSH connection source to local IP: {source_ip}")
+    can_reach_ssh, preflight_message = test_ssh_port_reachability(
+        ip,
+        timeout=max(3, min(timeout, 10)),
+        source_ip=source_ip,
+    )
+    if not can_reach_ssh:
+        print(f"TCP preflight failed before Paramiko auth: {preflight_message}")
+        if source_ip:
+            default_route_ok, default_route_message = test_ssh_port_reachability(
+                ip,
+                timeout=max(3, min(timeout, 10)),
+                source_ip=None,
+            )
+            if default_route_ok:
+                print("Default-route preflight succeeded without source binding.")
             else:
-                responses.append(password)  # Default to password for unknown prompts
-        return responses
+                print(f"Default-route preflight also failed: {default_route_message}")
+        print("Continuing anyway: attempting Paramiko connection in case this is transient.")
+
+    credential_candidates = get_ssh_credential_candidates(ip, username, password)
+    if not credential_candidates:
+        return None, None, "missing_credentials"
     
-    def attempt_connection(user, pwd):
+    def attempt_connection(user, pwd, credential_label):
         """Attempt SSH connection with given credentials"""
-        nonlocal client
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
+
+        print(f"Trying credential set: {credential_label} (username='{user}', password='{mask_secret(pwd)}')")
+
         # Update handler to use current password
         def handler(title, instructions, prompt_list):
             responses = []
             for prompt, echo in prompt_list:
                 responses.append(pwd)
             return responses
-        
+
         try:
+            bound_sock = None
+            if source_ip:
+                try:
+                    bound_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    bound_sock.bind((source_ip, 0))
+                    bound_sock.settimeout(timeout)
+                    bound_sock.connect((ip, 22))
+                    print(f"Using bound source socket for Paramiko: {source_ip}")
+                except OSError as bind_err:
+                    print(
+                        f"Bound source socket setup failed for {source_ip}: {bind_err}. "
+                        "Falling back to default routing."
+                    )
+                    try:
+                        bound_sock.close()
+                    except Exception:
+                        pass
+                    bound_sock = None
+
             # First try standard password authentication
-            client.connect(ip, username=user, password=pwd, timeout=timeout,
-                          allow_agent=False, look_for_keys=False)
+            connect_kwargs = {
+                "username": user,
+                "password": pwd,
+                "timeout": timeout,
+                "banner_timeout": timeout,
+                "auth_timeout": timeout,
+                "allow_agent": False,
+                "look_for_keys": False,
+            }
+            if bound_sock is not None:
+                connect_kwargs["sock"] = bound_sock
+
+            client.connect(
+                ip,
+                **connect_kwargs,
+            )
             print(f"Successfully connected to {ip} (password auth)")
-            
+
             # Create an interactive shell
             channel = client.invoke_shell()
             channel.settimeout(timeout)
-            
+
             # Wait for initial prompt
             time.sleep(2)
             initial_output = b""
@@ -141,11 +240,11 @@ def ssh_connect_with_shell(ip, username=None, password=None, timeout=10, prompt_
             print(initial_str)
             print("-----------------------------------------\n")
             
-            return client, channel, None  # Success, no error
+            return client, channel, "connected"  # Success
         except paramiko.AuthenticationException as auth_err:
-            print(f"Password authentication failed: {auth_err}")
+            print(f"Password authentication failed for '{user}' ({credential_label}): {auth_err}")
             print("Attempting keyboard-interactive authentication...")
-            
+
             # Close the failed connection and try keyboard-interactive
             try:
                 client.close()
@@ -154,21 +253,38 @@ def ssh_connect_with_shell(ip, username=None, password=None, timeout=10, prompt_
             
             try:
                 # Get transport for keyboard-interactive auth
-                transport = paramiko.Transport((ip, 22))
-                transport.connect()
+                if source_ip:
+                    try:
+                        kbd_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        kbd_sock.bind((source_ip, 0))
+                        kbd_sock.settimeout(timeout)
+                        kbd_sock.connect((ip, 22))
+                        transport = paramiko.Transport(kbd_sock)
+                        transport.start_client(timeout=timeout)
+                        print(f"Using bound source socket for keyboard-interactive auth: {source_ip}")
+                    except OSError as bind_err:
+                        print(
+                            f"Bound keyboard-interactive socket failed for {source_ip}: {bind_err}. "
+                            "Falling back to default routing."
+                        )
+                        transport = paramiko.Transport((ip, 22))
+                        transport.connect()
+                else:
+                    transport = paramiko.Transport((ip, 22))
+                    transport.connect()
                 transport.auth_interactive(user, handler)
-                
+
                 # Create client from transport
                 client = paramiko.SSHClient()
                 client._transport = transport
                 print(f"Successfully connected to {ip} (keyboard-interactive auth)")
-                
+
                 # Create an interactive shell
                 channel = transport.open_session()
                 channel.get_pty()
                 channel.invoke_shell()
                 channel.settimeout(timeout)
-                
+
                 # Wait for initial prompt
                 time.sleep(2)
                 initial_output = b""
@@ -181,10 +297,24 @@ def ssh_connect_with_shell(ip, username=None, password=None, timeout=10, prompt_
                 print(initial_str)
                 print("-----------------------------------------\n")
                 
-                return client, channel, None  # Success
+                return client, channel, "connected"
+            except paramiko.AuthenticationException as kbd_auth_err:
+                print(f"Keyboard-interactive authentication failed: {kbd_auth_err}")
+                return None, None, "auth_failed"
             except Exception as kbd_err:
                 print(f"Keyboard-interactive authentication also failed: {kbd_err}")
-                return None, None, "auth_failed"
+                return None, None, "socket_error"
+        except NoValidConnectionsError as conn_err:
+            print(f"Socket connection failed for {ip}:22 ({conn_err})")
+            if hasattr(conn_err, "errors") and conn_err.errors:
+                for dest, error in conn_err.errors.items():
+                    dest_host, dest_port = dest
+                    err_no = getattr(error, "errno", None)
+                    print(
+                        f"  - {dest_host}:{dest_port} -> {type(error).__name__}"
+                        f"{f' errno={err_no}' if err_no is not None else ''}: {error}"
+                    )
+            return None, None, "socket_error"
         except paramiko.SSHException as ssh_err:
             print(f"SSH error connecting to {ip}: {ssh_err}")
             return None, None, "ssh_error"
@@ -197,37 +327,43 @@ def ssh_connect_with_shell(ip, username=None, password=None, timeout=10, prompt_
         except Exception as e:
             print(f"Unexpected error connecting to {ip}: {type(e).__name__}: {e}")
             return None, None, "unknown_error"
-    
-    # First attempt with provided/default credentials
-    client, channel, error = attempt_connection(username, password)
-    
-    if client and channel:
-        return client, channel
-    
-    # If auth failed and prompt_on_fail is enabled, ask for manual credentials
-    if error == "auth_failed" and prompt_on_fail:
-        print("\n" + "="*50)
-        print("AUTHENTICATION FAILED - Enter credentials manually")
-        print("="*50)
-        print(f"(Press Enter to keep current value)")
-        
-        new_username = input(f"Username [{username}]: ").strip()
-        if new_username:
-            username = new_username
-        
-        new_password = getpass.getpass(f"Password: ")
-        if new_password:
-            password = new_password
-        
-        print(f"\nRetrying with username: '{username}'")
-        client, channel, error = attempt_connection(username, password)
-        
-        if client and channel:
-            return client, channel
-    
-    return None, None
 
-def retry_ssh_connect(ip, username=None, password=None, max_attempts=10, retry_delay=10, prompt_on_auth_fail=True):
+    last_error = "unknown_error"
+    for candidate_user, candidate_password, candidate_label in credential_candidates:
+        client, channel, result = attempt_connection(candidate_user, candidate_password, candidate_label)
+        if client and channel:
+            return client, channel, None
+        last_error = result
+
+    # If auth failed for all env/provided credentials and prompt_on_fail is enabled, ask for manual credentials.
+    if last_error == "auth_failed" and prompt_on_fail:
+        print("\n" + "=" * 50)
+        print("AUTHENTICATION FAILED - Enter credentials manually")
+        print("=" * 50)
+        fallback_user = credential_candidates[0][0]
+        new_username = input(f"Username [{fallback_user}]: ").strip() or fallback_user
+        new_password = getpass.getpass("Password: ")
+        if not new_password:
+            print("Manual password entry was empty; skipping manual retry.")
+            return None, None, last_error
+
+        print(f"\nRetrying with username: '{new_username}'")
+        client, channel, result = attempt_connection(new_username, new_password, "manual")
+        if client and channel:
+            return client, channel, None
+        last_error = result
+
+    return None, None, last_error
+
+def retry_ssh_connect(
+    ip,
+    username=None,
+    password=None,
+    max_attempts=10,
+    retry_delay=10,
+    prompt_on_auth_fail=True,
+    source_ip=None,
+):
     """Attempt to connect via SSH with multiple retries
     
     Args:
@@ -237,12 +373,9 @@ def retry_ssh_connect(ip, username=None, password=None, max_attempts=10, retry_d
         max_attempts: Maximum number of connection attempts
         retry_delay: Delay between retries in seconds
         prompt_on_auth_fail: If True, prompt for manual credentials on first auth failure
+        source_ip: Optional local source IP to bind before connecting
     """
     print(f"Attempting to connect to {ip} via SSH (max {max_attempts} attempts)...")
-    
-    # If credentials not provided, determine them based on IP
-    if username is None or password is None:
-        username, password = get_ssh_credentials(ip)
     
     prompted_for_creds = False
     
@@ -253,15 +386,25 @@ def retry_ssh_connect(ip, username=None, password=None, max_attempts=10, retry_d
         # After manual entry, use those credentials for subsequent retries
         should_prompt = prompt_on_auth_fail and not prompted_for_creds
         
-        ssh_client, channel = ssh_connect_with_shell(ip, username, password, prompt_on_fail=should_prompt)
+        ssh_client, channel, error = ssh_connect_with_shell(
+            ip,
+            username,
+            password,
+            prompt_on_fail=should_prompt,
+            source_ip=source_ip,
+        )
         
         if ssh_client and channel:
             print(f"✓ Successfully connected to {ip} on attempt {attempt}")
             return ssh_client, channel
         
         # Mark that we've given the user a chance to enter credentials
-        if should_prompt:
+        if should_prompt and error == "auth_failed":
             prompted_for_creds = True
+
+        if error in ("missing_credentials",):
+            print("Stopping retries because this failure will not improve without user/system changes.")
+            break
         
         if attempt < max_attempts:
             print(f"Connection failed. Waiting {retry_delay} seconds before retrying...")
@@ -327,6 +470,19 @@ def safe_close_ssh_connection(ssh_client, channel):
     
     # Give time for connection to fully terminate
     time.sleep(2)
+
+def wait_for_initial_ssh_ready(device_ip, ping_timeout=60, ping_interval=3, ssh_warmup_seconds=5):
+    """Give the initially connected device time to become reachable before SSH."""
+    if wait_for_ping(device_ip, timeout=ping_timeout, interval=ping_interval):
+        print(f"Waiting {ssh_warmup_seconds} seconds for SSH service to start...")
+        time.sleep(ssh_warmup_seconds)
+        return True
+
+    print(
+        f"Device {device_ip} did not respond to ping within {ping_timeout} seconds. "
+        "Continuing to SSH retries anyway."
+    )
+    return False
 
 def monitor_upgrade_progress(channel, timeout=300):
     """Monitor the upgrade process until completion or timeout"""
@@ -398,6 +554,8 @@ def main():
         print("Cancelled.")
         return
     auto_detect_mode = mode_index == 0
+
+    operation_succeeded = False
 
     if choice == "1":
         # Offer two options for firmware selection
@@ -511,6 +669,9 @@ def main():
     
     # Clear SSH key for device IP
     clear_ssh_key(device_ip)
+
+    print("\n===== STEP 2.5: WAIT FOR DEVICE NETWORK =====")
+    wait_for_initial_ssh_ready(device_ip)
     
     if choice == "1":
         # Connect to device via SSH and perform upgrade
@@ -518,7 +679,13 @@ def main():
         print(f"Connecting to device at {device_ip}...")
         
         # SSH connection with interactive shell and automatic credential selection
-        ssh_client, channel = ssh_connect_with_shell(device_ip, prompt_on_fail=True)
+        ssh_client, channel = retry_ssh_connect(
+            device_ip,
+            max_attempts=5,
+            retry_delay=10,
+            prompt_on_auth_fail=True,
+            source_ip=computer_ip,
+        )
         if not ssh_client or not channel:
             print("Failed to connect to device. Please check the connection and try again.")
             return
@@ -590,11 +757,12 @@ def main():
             
             # Connect to upgraded device with retries
             print(f"\nConnecting to upgraded device at {new_device_ip}...")
-            ssh_client, channel = retry_ssh_connect(new_device_ip)
+            ssh_client, channel = retry_ssh_connect(new_device_ip, source_ip=computer_ip)
             
             if ssh_client and channel:
                 extract_device_info(ssh_client, channel, new_device_ip, operation_type="Upgrade")
                 ssh_client.close()
+                operation_succeeded = True
             
             # Final instructions for web configuration
             print("\n===== STEP 6: COMPLETE SETUP VIA WEB GUI =====")
@@ -609,19 +777,27 @@ def main():
         print(f"Connecting to device at {device_ip}...")
         
         # Connect to device with retries and automatic credential selection
-        ssh_client, channel = retry_ssh_connect(device_ip, max_attempts=5, retry_delay=15)
+        ssh_client, channel = retry_ssh_connect(
+            device_ip,
+            max_attempts=5,
+            retry_delay=15,
+            source_ip=computer_ip,
+        )
         
         if ssh_client and channel:
             extract_device_info(ssh_client, channel, device_ip, operation_type="Info Only")
             ssh_client.close()
+            operation_succeeded = True
         else:
             print("Failed to connect to device. Please check the connection and try again.")
     
     print("\n===== OPERATION COMPLETE =====")
-    if choice == "1":
+    if choice == "1" and operation_succeeded:
         print("The device has been successfully upgraded and configured.")
-    else:
+    elif choice != "1" and operation_succeeded:
         print("Device information has been successfully extracted.")
+    else:
+        print("Operation did not complete successfully.")
     
     if choice == "1":
         print("\nThe HTTP server is still running. Press Ctrl+C to exit the program when you're finished.")

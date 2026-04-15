@@ -58,3 +58,14 @@ UPGRADED_PASSWORD=new_password
 python main.py
 ```
 3. Follow the on-screen instructions to complete the firmware upgrade process or extract device information
+
+If a repo-local `venv` exists, `main.py` will automatically relaunch itself with that interpreter so the bundled dependencies and SSH behavior stay consistent.
+
+## SSH connection notes
+
+- The ADTRAN workflow now performs a TCP preflight check to `device_ip:22` before Paramiko authentication starts.
+- ADTRAN SSH connections are bound to the detected local Ethernet IP so Paramiko uses the same source interface as the selected device link.
+- Before the first ADTRAN SSH login, the tool waits for the device to answer ping and then gives SSH a short warm-up period.
+- For `172.16.192.x` devices, it tries upgraded credentials first and then falls back to initial credentials if authentication fails.
+- If required environment credentials are missing, the tool will stop early with a clear message instead of retrying indefinitely.
+- During retries, only missing-credential failures are treated as non-retryable; transient network reachability errors continue retrying.

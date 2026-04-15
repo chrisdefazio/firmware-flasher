@@ -4,10 +4,40 @@ Main entry point for firmware upgrade utilities.
 Allows users to select between ADTRAN and COMTREND firmware upgrade tools.
 """
 
+import os
 import sys
 from simple_term_menu import TerminalMenu
 
 from network_utils import drain_tty_input, reset_tty_sane
+
+
+def get_project_python():
+    """Return the repo-local virtualenv interpreter when available."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.name == "nt":
+        candidate = os.path.join(base_dir, "venv", "Scripts", "python.exe")
+    else:
+        candidate = os.path.join(base_dir, "venv", "bin", "python")
+    return candidate if os.path.exists(candidate) else None
+
+
+def ensure_project_python():
+    """Relaunch with the repo virtualenv to keep runtime behavior consistent."""
+    project_python = get_project_python()
+    if not project_python:
+        return
+
+    current_python = os.path.realpath(sys.executable)
+    desired_python = os.path.realpath(project_python)
+    if current_python == desired_python:
+        return
+
+    if os.environ.get("FIRMWARE_UPGRADER_REEXECED") == "1":
+        return
+
+    print(f"Re-launching with project virtualenv: {desired_python}")
+    os.environ["FIRMWARE_UPGRADER_REEXECED"] = "1"
+    os.execv(desired_python, [desired_python] + sys.argv)
 
 
 def main():
@@ -63,6 +93,7 @@ def main():
 
 if __name__ == "__main__":
     try:
+        ensure_project_python()
         main()
     except KeyboardInterrupt:
         print("\n\nExiting program...")
