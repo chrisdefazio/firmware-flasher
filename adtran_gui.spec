@@ -7,6 +7,11 @@ from pathlib import Path
 datas = []
 if Path("firmware_images").exists():
     datas.append(("firmware_images", "firmware_images"))
+if Path("assets/icon").exists():
+    datas.append(("assets/icon", "assets/icon"))
+
+mac_icon = Path("assets/icon/adtran_modem_icon.icns")
+windows_icon = Path("assets/icon/adtran_modem_icon.ico")
 
 hiddenimports = [
     "keyring.backends.macOS",
@@ -50,6 +55,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(windows_icon) if sys.platform.startswith("win") and windows_icon.exists() else None,
 )
 
 coll = COLLECT(
@@ -66,6 +72,6 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="ADTRAN Firmware Upgrader.app",
-        icon=None,
+        icon=str(mac_icon) if mac_icon.exists() else None,
         bundle_identifier="com.firmwaretools.adtran-firmware-upgrader",
     )

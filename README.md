@@ -92,6 +92,14 @@ On macOS this produces `dist/ADTRAN Firmware Upgrader.app`. On Windows this prod
 
 See `packaging/OPERATOR_README.md` for the short guide to ship with the app.
 
+## App icon
+
+The app icon source is `assets/icon/adtran_modem_icon.svg`. Regenerate the checked-in PNG, `.ico`, and `.icns` assets with:
+
+```bash
+python tools/build_icon_assets.py
+```
+
 ## SSH connection notes
 
 - The ADTRAN workflow now performs a TCP preflight check to `device_ip:22` before Paramiko authentication starts.

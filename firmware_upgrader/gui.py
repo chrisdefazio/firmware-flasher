@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -48,6 +48,18 @@ from firmware_upgrader.adtran_service import (
     DeviceRecord,
 )
 from firmware_upgrader.settings import SettingsStore
+
+
+def resource_path(relative_path: str) -> Path:
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    return base_path / relative_path
+
+
+def app_icon() -> QIcon:
+    if QGuiApplication.instance() is None:
+        return QIcon()
+    icon_path = resource_path("assets/icon/adtran_modem_icon_256.png")
+    return QIcon(str(icon_path))
 
 
 class AdtranWorker(QThread):
@@ -167,6 +179,7 @@ class MainWindow(QMainWindow):
         self.worker: Optional[AdtranWorker] = None
 
         self.setWindowTitle("ADTRAN Firmware Upgrader")
+        self.setWindowIcon(app_icon())
         self.resize(1160, 760)
 
         self.operation_combo = QComboBox()
@@ -641,6 +654,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("ADTRAN Firmware Upgrader")
     app.setOrganizationName("FirmwareTools")
+    app.setWindowIcon(app_icon())
     window = MainWindow()
     window.show()
     return app.exec()

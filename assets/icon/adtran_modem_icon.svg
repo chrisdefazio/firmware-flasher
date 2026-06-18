@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">ADTRAN Firmware Upgrader modem icon</title>
+  <desc id="desc">A modern modem with status lights and an upload arrow.</desc>
+  <defs>
+    <linearGradient id="background" x1="160" y1="96" x2="864" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#164e63"/>
+    </linearGradient>
+    <linearGradient id="modem" x1="252" y1="336" x2="772" y2="712" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e5edf5"/>
+    </linearGradient>
+    <linearGradient id="face" x1="300" y1="410" x2="724" y2="646" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f8fbfd"/>
+      <stop offset="1" stop-color="#d9e4ee"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="30" stdDeviation="28" flood-color="#062f35" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#background)"/>
+  <path d="M208 754c74 66 173 106 304 106s230-40 304-106" fill="none" stroke="#9ee7dd" stroke-width="26" stroke-linecap="round" opacity="0.32"/>
+
+  <g filter="url(#shadow)">
+    <path d="M245 444c9-62 61-108 123-108h288c62 0 114 46 123 108l42 289c6 41-26 78-67 78H270c-41 0-73-37-67-78l42-289z" fill="url(#modem)"/>
+    <path d="M316 434c5-32 32-56 65-56h262c33 0 60 24 65 56l31 202H285l31-202z" fill="url(#face)"/>
+    <path d="M285 636h454l18 118H267l18-118z" fill="#c8d7e3"/>
+    <path d="M336 706h126" stroke="#516273" stroke-width="20" stroke-linecap="round"/>
+    <circle cx="544" cy="706" r="17" fill="#16a34a"/>
+    <circle cx="606" cy="706" r="17" fill="#f59e0b"/>
+    <circle cx="668" cy="706" r="17" fill="#22d3ee"/>
+  </g>
+
+  <g fill="none" stroke="#134e4a" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 574V432"/>
+    <path d="M456 488l56-56 56 56"/>
+  </g>
+  <g fill="none" stroke="#99f6e4" stroke-width="24" stroke-linecap="round" opacity="0.85">
+    <path d="M396 292c61-54 171-54 232 0"/>
+    <path d="M452 346c32-27 88-27 120 0"/>
+  </g>
+</svg>
