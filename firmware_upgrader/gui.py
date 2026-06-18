@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from network_utils import get_network_interfaces
 
+from firmware_upgrader import __version__
 from firmware_upgrader.adtran_service import (
     CSV_HEADERS,
     OPERATION_INFO_ONLY,
@@ -251,9 +252,12 @@ class MainWindow(QMainWindow):
         title.setObjectName("title")
         subtitle = QLabel("One connected device at a time")
         subtitle.setObjectName("subtitle")
+        metadata = QLabel(f"Created by: Chris DeFazio • Version {__version__}")
+        metadata.setObjectName("metadataLabel")
         title_column = QVBoxLayout()
         title_column.addWidget(title)
         title_column.addWidget(subtitle)
+        title_column.addWidget(metadata)
         header_layout.addLayout(title_column)
         header_layout.addStretch()
         header_layout.addWidget(self.status_label)
@@ -636,8 +640,11 @@ class MainWindow(QMainWindow):
                 font-size: 24px;
                 font-weight: 700;
             }
-            QLabel#subtitle, QLabel#hintLabel {
+            QLabel#subtitle, QLabel#metadataLabel, QLabel#hintLabel {
                 color: #566273;
+            }
+            QLabel#metadataLabel {
+                font-size: 12px;
             }
             QLabel#statusBadge {
                 background: #f3c969;
