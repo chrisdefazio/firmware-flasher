@@ -53,13 +53,44 @@ UPGRADED_PASSWORD=new_password
 ## Usage
 
 1. Place your firmware image files in the firmware_images directory
-2. Run the script:
+2. Run the GUI:
+```bash
+python adtran_gui.py
+```
+3. Open Settings, enter the initial and upgraded ADTRAN SSH credentials, select a firmware image, and click Start Device.
+
+The original terminal menu is still available:
 ```bash
 python main.py
 ```
-3. Follow the on-screen instructions to complete the firmware upgrade process or extract device information
+Follow the on-screen instructions to complete the firmware upgrade process or extract device information.
 
 If a repo-local `venv` exists, `main.py` will automatically relaunch itself with that interpreter so the bundled dependencies and SSH behavior stay consistent.
+
+## Desktop GUI
+
+The GUI is ADTRAN-first and is designed for one-device-at-a-time bench work:
+
+- Firmware picker for upgrade jobs
+- Auto-detected or manually selected Ethernet interface
+- Progress/status display and live SSH/device log
+- Settings dialog for initial and upgraded credentials
+- CSV output table for completed devices in the current session
+- Open/export actions for the device CSV
+
+Passwords are stored with the operating system credential store through `keyring`. Non-secret defaults such as IP addresses and output CSV path are stored with Qt settings.
+
+## Packaging
+
+Install packaging dependencies from `requirements.txt`, then build with PyInstaller:
+
+```bash
+pyinstaller adtran_gui.spec
+```
+
+On macOS this produces `dist/ADTRAN Firmware Upgrader.app`. On Windows this produces `dist/ADTRAN Firmware Upgrader/ADTRAN Firmware Upgrader.exe`.
+
+See `packaging/OPERATOR_README.md` for the short guide to ship with the app.
 
 ## SSH connection notes
 
