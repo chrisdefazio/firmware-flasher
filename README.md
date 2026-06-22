@@ -82,13 +82,25 @@ Passwords are stored with the operating system credential store through `keyring
 
 ## Packaging
 
-Install packaging dependencies from `requirements.txt`, then build with PyInstaller:
+Install packaging dependencies from `requirements.txt`.
+
+For macOS, build the `.app` bundle with the checked-in spec:
 
 ```bash
 pyinstaller adtran_gui.spec
 ```
 
-On macOS this produces `dist/ADTRAN Firmware Upgrader.app`. On Windows this produces `dist/ADTRAN Firmware Upgrader/ADTRAN Firmware Upgrader.exe`.
+This produces `dist/ADTRAN Firmware Upgrader.app`.
+
+For Windows, run the onefile helper on a Windows machine or VM:
+
+```powershell
+.\venv\Scripts\python.exe tools\build_windows_onefile.py
+```
+
+This produces a single executable at `dist\ADTRAN Firmware Upgrader.exe`.
+
+Windows onefile builds extract to a temporary folder when launched, so first startup can be slower. Unsigned onefile executables may also trigger stricter Windows Defender or SmartScreen warnings than the onedir build.
 
 See `packaging/OPERATOR_README.md` for the short guide to ship with the app.
 
