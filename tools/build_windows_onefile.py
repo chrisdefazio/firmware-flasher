@@ -75,6 +75,20 @@ def build_command() -> list[str]:
     return command
 
 
+def build_environment() -> dict[str, str]:
+    """Keep unrelated PATH DLLs out of the frozen application's dependency scan."""
+    env = os.environ.copy()
+    windows = Path(os.environ.get("SystemRoot", os.environ.get("WINDIR", r"C:\Windows")))
+    env["PATH"] = os.pathsep.join(str(path) for path in (
+        Path(sys.executable).parent,
+        Path(sys.base_prefix),
+        Path(sys.base_prefix) / "DLLs",
+        windows / "System32",
+        windows,
+    ))
+    return env
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build the Windows onefile ADTRAN Firmware Upgrader executable."
@@ -107,7 +121,7 @@ def main() -> int:
             print(f"Missing build asset: {path}", file=sys.stderr)
             return 1
     try:
-        subprocess.run(command, cwd=ROOT, check=True)
+        subprocess.run(command, cwd=ROOT, env=build_environment(), check=True)
     except subprocess.CalledProcessError as exc:
         return exc.returncode
     print(f"Built {ROOT / 'dist' / f'{APP_NAME}.exe'}")

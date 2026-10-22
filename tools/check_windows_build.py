@@ -1,5 +1,6 @@
 """Launch the Windows onefile build outside the checkout and verify startup."""
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,9 @@ import tempfile
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--native", action="store_true", help="Briefly show the native Windows GUI during the startup check.")
+    args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     executable = root / "dist" / "ADTRAN Firmware Upgrader.exe"
     if os.name != "nt":
@@ -18,7 +22,8 @@ def main() -> None:
         result = subprocess.run(
             [str(executable), "--smoke-test", str(report_path)], cwd=directory,
             stdin=subprocess.DEVNULL, timeout=120, check=False,
-            env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+            env={**os.environ, "QT_QPA_PLATFORM": "windows" if args.native else "offscreen",
+                 "QT_QPA_FONTDIR": str(Path(os.environ["WINDIR"]) / "Fonts")},
         )
         if result.returncode or not report_path.is_file():
             raise SystemExit("Packaged app did not complete its startup check.")
