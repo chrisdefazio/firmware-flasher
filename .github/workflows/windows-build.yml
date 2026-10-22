@@ -1,0 +1,39 @@
+name: Windows desktop build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          architecture: x64
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Build onefile executable
+        run: python tools/build_windows_onefile.py
+      - name: Check packaged app outside the checkout
+        run: python tools/check_windows_build.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ADTRAN-Firmware-Upgrader-Windows
+          path: |
+            dist/ADTRAN Firmware Upgrader.exe
+            packaging/OPERATOR_README.md
+          if-no-files-found: error

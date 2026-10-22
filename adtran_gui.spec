@@ -4,27 +4,30 @@ import sys
 from pathlib import Path
 
 
+root = Path(SPECPATH)
 datas = []
-if Path("firmware_images").exists():
-    datas.append(("firmware_images", "firmware_images"))
-if Path("assets/icon").exists():
-    datas.append(("assets/icon", "assets/icon"))
+firmware_dir = root / "firmware_images"
+if firmware_dir.is_dir():
+    for path in sorted(firmware_dir.iterdir()):
+        if path.is_file() and not path.is_symlink() and path.suffix.lower() in {".img", ".bin"}:
+            datas.append((str(path), "firmware_images"))
+if (root / "assets/icon").exists():
+    datas.append((str(root / "assets/icon"), "assets/icon"))
 
-mac_icon = Path("assets/icon/adtran_modem_icon.icns")
-windows_icon = Path("assets/icon/adtran_modem_icon.ico")
+mac_icon = root / "assets/icon/adtran_modem_icon.icns"
+windows_icon = root / "assets/icon/adtran_modem_icon.ico"
 
 hiddenimports = [
-    "keyring.backends.macOS",
-    "keyring.backends.Windows",
-    "keyring.backends.SecretService",
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
+    "PySide6.QtNetwork",
 ]
+hiddenimports.append("keyring.backends.macOS" if sys.platform == "darwin" else "keyring.backends.Windows")
 
 a = Analysis(
-    ["adtran_gui.py"],
-    pathex=[],
+    [str(root / "adtran_gui.py")],
+    pathex=[str(root)],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

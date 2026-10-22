@@ -1,6 +1,6 @@
 """Shared network and connection detection for firmware upgraders.
 No UI or TerminalMenu; device-specific scripts handle prompts."""
-import os
+from ipaddress import IPv4Address
 import platform
 import select
 import subprocess
@@ -367,18 +367,37 @@ def get_network_interfaces():
         return interfaces
 
 
-def wait_for_ping(ip, timeout=300, interval=5):
+def wait_for_ping(ip, timeout=300, interval=5, source_ip=None, log=print):
     """Wait for device to respond to ping."""
-    print(f"Waiting for device {ip} to respond to ping...")
-    start_time = time.time()
-    ping_cmd = "ping -n 1 " if platform.system().lower() == "windows" else "ping -c 1 "
-    devnull = " > nul" if platform.system().lower() == "windows" else " > /dev/null"
-    while time.time() - start_time < timeout:
-        response = os.system(ping_cmd + ip + devnull)
-        if response == 0:
-            print(f"Device {ip} is responding to ping!")
+    ip = str(IPv4Address(ip))
+    if source_ip:
+        source_ip = str(IPv4Address(source_ip))
+    system = platform.system()
+    if system == "Windows":
+        command = ["ping", "-n", "1", "-w", "1000"]
+    else:
+        command = ["ping", "-c", "1", "-W", "1000" if system == "Darwin" else "1"]
+    if source_ip:
+        command.extend(["-I" if system == "Linux" else "-S", source_ip])
+    command.append(ip)
+    log(f"Waiting for device {ip} to respond to ping...")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            response = subprocess.run(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=min(3, deadline - time.monotonic()),
+                creationflags=0x08000000 if system == "Windows" else 0,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            response = None
+        except OSError as exc:
+            log(f"Could not run ping: {exc}")
+            return False
+        if response is not None and response.returncode == 0:
+            log(f"Device {ip} is responding to ping!")
             return True
-        time.sleep(interval)
-        print(f"Still waiting for device {ip}... ({int(time.time() - start_time)}s elapsed)")
-    print(f"Timeout waiting for device {ip} to respond to ping")
+        time.sleep(max(0, min(interval, deadline - time.monotonic())))
+    log(f"Timeout waiting for device {ip} to respond to ping")
     return False

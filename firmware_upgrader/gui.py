@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtCore import Qt, QSettings, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +28,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QPlainTextEdit,
     QProgressBar,
     QAbstractItemView,
@@ -35,8 +39,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from network_utils import get_network_interfaces
-
 from firmware_upgrader import __version__
 from firmware_upgrader.adtran_service import (
     CSV_HEADERS,
@@ -45,15 +47,32 @@ from firmware_upgrader.adtran_service import (
     AdtranCredentials,
     AdtranJob,
     AdtranJobResult,
+    AdtranServiceError,
     AdtranUpgradeService,
     DeviceRecord,
+    append_device_record,
 )
-from firmware_upgrader.settings import SettingsStore
+from firmware_upgrader.network import network_addresses
+from firmware_upgrader.settings import CredentialStoreError, SettingsStore
 
 
 def resource_path(relative_path: str) -> Path:
     base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
     return base_path / relative_path
+
+
+def load_firmware_path(value: str) -> str:
+    if value.startswith("bundled:"):
+        return str(resource_path("firmware_images") / Path(value.removeprefix("bundled:")).name)
+    return value
+
+
+def save_firmware_path(value: str) -> str:
+    if value:
+        path = Path(value).expanduser().resolve()
+        if path.parent == resource_path("firmware_images").resolve():
+            return "bundled:" + path.name
+    return value
 
 
 def app_icon() -> QIcon:
@@ -81,7 +100,7 @@ class AdtranWorker(QThread):
         try:
             result = service.run_job(self.job)
         except Exception as exc:  # pragma: no cover - exercised by GUI runtime
-            self.failed.emit(str(exc))
+            self.failed.emit(service.redact(str(exc)))
             return
         self.finished_ok.emit(result)
 
@@ -128,7 +147,7 @@ class SettingsDialog(QDialog):
         keyring_label = QLabel(
             "Passwords are stored in the operating system credential store."
             if store.keyring_available()
-            else "Keyring is unavailable. Install the keyring package before using saved passwords."
+            else "The operating system credential store is unavailable. Passwords cannot be saved."
         )
         keyring_label.setWordWrap(True)
         keyring_label.setObjectName("hintLabel")
@@ -174,26 +193,35 @@ class SettingsDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, store: Optional[SettingsStore] = None):
         super().__init__()
-        self.store = SettingsStore()
+        self.store = store if store is not None else SettingsStore()
         self.worker: Optional[AdtranWorker] = None
+        self.pending_result: Optional[AdtranJobResult] = None
 
         self.setWindowTitle("ADTRAN Firmware Upgrader")
         self.setWindowIcon(app_icon())
-        self.resize(1160, 760)
+        available = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(1160, available.width() - 40), min(760, available.height() - 40))
 
         self.operation_combo = QComboBox()
+        self.operation_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.operation_combo.setMinimumContentsLength(16)
         self.operation_combo.addItem("Upgrade firmware and record info", OPERATION_UPGRADE)
         self.operation_combo.addItem("Record device info only", OPERATION_INFO_ONLY)
         self.operation_combo.currentIndexChanged.connect(self.update_operation_controls)
 
-        self.firmware_path = QLineEdit(self.store.firmware_path())
+        self.firmware_path = QLineEdit(load_firmware_path(self.store.firmware_path()))
         self.firmware_path.setPlaceholderText("Choose an ADTRAN firmware image")
         self.browse_firmware_button = QPushButton("Browse")
         self.browse_firmware_button.clicked.connect(self.choose_firmware)
 
         self.interface_combo = QComboBox()
+        self.interface_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.interface_combo.setMinimumContentsLength(8)
+        self.local_ip = QLineEdit()
+        self.local_ip.setPlaceholderText("Automatic, or enter local IPv4")
+        self.interface_combo.currentIndexChanged.connect(self.interface_changed)
         self.refresh_interfaces_button = QPushButton("Refresh")
         self.refresh_interfaces_button.clicked.connect(self.refresh_interfaces)
 
@@ -205,6 +233,8 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel("Ready")
         self.status_label.setObjectName("statusBadge")
+        self.status_label.setWordWrap(True)
+        self.status_label.setMaximumWidth(360)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -222,6 +252,9 @@ class MainWindow(QMainWindow):
         self.open_csv_button.clicked.connect(self.open_csv)
         self.export_csv_button = QPushButton("Export CSV")
         self.export_csv_button.clicked.connect(self.export_csv)
+        self.save_record_button = QPushButton("Save Record")
+        self.save_record_button.clicked.connect(self.save_pending_record)
+        self.save_record_button.hide()
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -233,6 +266,7 @@ class MainWindow(QMainWindow):
         self.results_table.horizontalHeader().setStretchLastSection(True)
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.results_table.setAlternatingRowColors(True)
+        self.results_table.resizeColumnsToContents()
 
         self.setCentralWidget(self.build_layout())
         self.refresh_interfaces()
@@ -268,25 +302,35 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.build_work_panel())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        root_layout.addWidget(splitter, 1)
 
         results_group = QGroupBox("Completed devices this session")
         results_layout = QVBoxLayout(results_group)
         results_actions = QHBoxLayout()
         results_actions.addStretch()
+        results_actions.addWidget(self.save_record_button)
         results_actions.addWidget(self.open_csv_button)
         results_actions.addWidget(self.export_csv_button)
         results_layout.addLayout(results_actions)
         results_layout.addWidget(self.results_table)
-        root_layout.addWidget(results_group, 1)
+        content_splitter = QSplitter(Qt.Orientation.Vertical)
+        content_splitter.addWidget(splitter)
+        content_splitter.addWidget(results_group)
+        content_splitter.setChildrenCollapsible(False)
+        content_splitter.setStretchFactor(0, 3)
+        content_splitter.setStretchFactor(1, 1)
+        content_splitter.setSizes([430, 180])
+        root_layout.addWidget(content_splitter, 1)
 
         return root
 
     def build_controls_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(360)
+        panel.setMinimumWidth(400)
         panel.setMaximumWidth(430)
-        layout = QVBoxLayout(panel)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        controls = QWidget()
+        layout = QVBoxLayout(controls)
         layout.setSpacing(12)
 
         job_group = QGroupBox("Job")
@@ -306,10 +350,12 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(QLabel("Interface"), 0, 0)
         connection_layout.addWidget(self.interface_combo, 0, 1)
         connection_layout.addWidget(self.refresh_interfaces_button, 0, 2)
-        connection_layout.addWidget(QLabel("Device IP"), 1, 0)
-        connection_layout.addWidget(self.device_ip, 1, 1, 1, 2)
-        connection_layout.addWidget(QLabel("Upgraded IP"), 2, 0)
-        connection_layout.addWidget(self.upgraded_device_ip, 2, 1, 1, 2)
+        connection_layout.addWidget(QLabel("Local IP"), 1, 0)
+        connection_layout.addWidget(self.local_ip, 1, 1, 1, 2)
+        connection_layout.addWidget(QLabel("Device IP"), 2, 0)
+        connection_layout.addWidget(self.device_ip, 2, 1, 1, 2)
+        connection_layout.addWidget(QLabel("Upgraded IP"), 3, 0)
+        connection_layout.addWidget(self.upgraded_device_ip, 3, 1, 1, 2)
         layout.addWidget(connection_group)
 
         output_group = QGroupBox("Output")
@@ -324,8 +370,14 @@ class MainWindow(QMainWindow):
         action_row.addStretch()
         action_row.addWidget(self.next_button)
         action_row.addWidget(self.start_button)
-        layout.addLayout(action_row)
         layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(controls)
+        panel_layout.addWidget(scroll, 1)
+        panel_layout.addLayout(action_row)
 
         return panel
 
@@ -348,29 +400,37 @@ class MainWindow(QMainWindow):
 
     def refresh_interfaces(self) -> None:
         current_ip = self.selected_local_ip()
+        current_interface = self.selected_interface_name()
         self.interface_combo.clear()
         self.interface_combo.addItem("Auto detect wired Ethernet", ("", ""))
         try:
-            interfaces = get_network_interfaces()
+            interfaces = network_addresses()
         except Exception as exc:
             self.append_log(f"Could not list network interfaces: {exc}")
             interfaces = []
-        for iface, ip in interfaces:
-            self.interface_combo.addItem(f"{iface}: {ip}", (iface, ip))
+        for address in interfaces:
+            self.interface_combo.addItem(
+                f"{address.label}: {address.ip}", (address.name, address.ip)
+            )
 
-        if current_ip:
+        if current_ip or current_interface:
+            fallback_index = 0
             for index in range(self.interface_combo.count()):
-                _iface, ip = self.interface_combo.itemData(index)
+                iface, ip = self.interface_combo.itemData(index)
                 if ip == current_ip:
                     self.interface_combo.setCurrentIndex(index)
                     break
+                if current_interface and iface == current_interface:
+                    fallback_index = index
+            else:
+                self.interface_combo.setCurrentIndex(fallback_index)
+
+    def interface_changed(self) -> None:
+        data = self.interface_combo.currentData()
+        self.local_ip.setText(data[1] if data else "")
 
     def selected_local_ip(self) -> str:
-        data = self.interface_combo.currentData()
-        if not data:
-            return ""
-        _iface, ip = data
-        return ip
+        return self.local_ip.text().strip()
 
     def selected_interface_name(self) -> str:
         data = self.interface_combo.currentData()
@@ -389,12 +449,13 @@ class MainWindow(QMainWindow):
         filename, _selected_filter = QFileDialog.getOpenFileName(
             self,
             "Choose ADTRAN firmware image",
-            self.firmware_path.text() or "firmware_images",
+            self.firmware_path.text() if Path(self.firmware_path.text()).is_file()
+            else str(resource_path("firmware_images")),
             "Firmware images (*.img *.bin);;All files (*)",
         )
         if filename:
             self.firmware_path.setText(filename)
-            self.store.set_firmware_path(filename)
+            self.store.set_firmware_path(save_firmware_path(filename))
 
     def choose_output_csv(self) -> None:
         filename, _selected_filter = QFileDialog.getSaveFileName(
@@ -408,7 +469,11 @@ class MainWindow(QMainWindow):
             self.store.set_output_csv_path(filename)
 
     def open_settings(self) -> bool:
-        dialog = SettingsDialog(self.store, self)
+        try:
+            dialog = SettingsDialog(self.store, self)
+        except CredentialStoreError as exc:
+            QMessageBox.warning(self, "Credentials unavailable", str(exc))
+            return False
         accepted = dialog.exec() == QDialog.Accepted
         if accepted:
             self.device_ip.setText(self.store.device_ip())
@@ -417,6 +482,8 @@ class MainWindow(QMainWindow):
         return accepted
 
     def start_job(self) -> None:
+        if self.worker is not None or self.pending_result is not None:
+            return
         try:
             job = self.build_job()
         except ValueError as exc:
@@ -457,14 +524,21 @@ class MainWindow(QMainWindow):
         self.store.set_device_ip(self.device_ip.text())
         self.store.set_upgraded_device_ip(self.upgraded_device_ip.text())
         self.store.set_output_csv_path(output_csv)
-        self.store.set_firmware_path(firmware_path)
+        self.store.set_firmware_path(save_firmware_path(firmware_path))
+
+        selected = self.interface_combo.currentData()
+        local_ip = self.selected_local_ip()
+        # A dropdown address is a snapshot. Reread that adapter at job start; an
+        # explicitly edited Local IP remains an exact address selection.
+        if selected and selected[0] and local_ip == selected[1]:
+            local_ip = ""
 
         return AdtranJob(
             operation=operation,
             credentials=self.store.credentials(),
             firmware_path=firmware_path,
             interface_name=self.selected_interface_name(),
-            local_ip=self.selected_local_ip(),
+            local_ip=local_ip,
             device_ip=self.device_ip.text().strip() or "192.168.1.1",
             upgraded_device_ip=self.upgraded_device_ip.text().strip() or "172.16.192.1",
             output_csv_path=output_csv,
@@ -476,6 +550,7 @@ class MainWindow(QMainWindow):
             self.firmware_path,
             self.browse_firmware_button,
             self.interface_combo,
+            self.local_ip,
             self.refresh_interfaces_button,
             self.device_ip,
             self.upgraded_device_ip,
@@ -483,18 +558,32 @@ class MainWindow(QMainWindow):
             self.browse_csv_button,
             self.settings_button,
             self.start_button,
+            self.open_csv_button,
+            self.export_csv_button,
         ):
             widget.setEnabled(not running)
         if not running:
             self.update_operation_controls()
-        self.next_button.setEnabled(not running and self.results_table.rowCount() > 0)
+        has_pending_record = self.pending_result is not None
+        self.start_button.setEnabled(not running and not has_pending_record)
+        self.next_button.setEnabled(
+            not running and not has_pending_record and self.results_table.rowCount() > 0
+        )
+        self.save_record_button.setEnabled(not running)
 
     def on_progress(self, percent: int, message: str) -> None:
         self.progress.setValue(percent)
         self.status_label.setText(message)
 
     def on_job_finished(self, result: AdtranJobResult) -> None:
-        self.set_running(False)
+        if not result.success:
+            self.pending_result = result
+            self.save_record_button.show()
+            self.status_label.setText("Record not saved")
+            for warning in result.warnings:
+                self.append_log(warning)
+            QMessageBox.warning(self, "Device data not saved", "\n".join(result.warnings))
+            return
         self.progress.setValue(100)
         self.status_label.setText("Complete")
         for warning in result.warnings:
@@ -505,15 +594,20 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Device complete", "The ADTRAN job finished successfully.")
 
     def on_job_failed(self, message: str) -> None:
-        self.set_running(False)
         self.status_label.setText("Failed")
         self.append_log(f"ERROR: {message}")
         QMessageBox.critical(self, "ADTRAN job failed", message)
 
     def worker_finished(self) -> None:
+        if self.worker is not None:
+            self.worker.deleteLater()
         self.worker = None
+        self.set_running(False)
 
     def prepare_next_device(self) -> None:
+        if self.worker is not None or self.pending_result is not None:
+            return
+        self.refresh_interfaces()
         self.progress.setValue(0)
         self.status_label.setText("Ready for next device")
         self.log_view.clear()
@@ -524,11 +618,63 @@ class MainWindow(QMainWindow):
         row = self.results_table.rowCount()
         self.results_table.insertRow(row)
         for column, value in enumerate(record.to_csv_row()):
+            if CSV_HEADERS[column] == "WiFi Password" and value:
+                value = "********"
             item = QTableWidgetItem(value)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.results_table.setItem(row, column, item)
         self.results_table.resizeColumnsToContents()
-        self.next_button.setEnabled(True)
+
+    def save_pending_record(self) -> None:
+        if self.worker is not None or self.pending_result is None:
+            return
+        filename, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Save device record", self.pending_result.csv_path,
+            "CSV files (*.csv);;All files (*)",
+            options=QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if not filename:
+            return
+        try:
+            path = append_device_record(self.pending_result.record, filename)
+        except (OSError, UnicodeError, AdtranServiceError):
+            QMessageBox.warning(
+                self, "Record not saved", "Close the CSV in Excel or choose another writable file."
+            )
+            return
+        self.add_record(self.pending_result.record)
+        self.pending_result = None
+        self.save_record_button.hide()
+        self.output_csv.setText(str(path))
+        self.store.set_output_csv_path(str(path))
+        self.progress.setValue(100)
+        self.status_label.setText("Complete")
+        self.append_log(f"Saved device data to {path}")
+        self.set_running(False)
+
+    def closeEvent(self, event) -> None:
+        if self.worker is not None:
+            event.ignore()
+            QMessageBox.warning(
+                self, "Device operation in progress",
+                "Wait for the device operation to finish before closing the app. Keep the device powered.",
+            )
+            return
+        if self.pending_result is not None:
+            choice = QMessageBox.warning(
+                self, "Unsaved device record", "Save the device record before closing?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if choice == QMessageBox.StandardButton.Save:
+                self.save_pending_record()
+            if choice == QMessageBox.StandardButton.Cancel or (
+                choice == QMessageBox.StandardButton.Save and self.pending_result is not None
+            ):
+                event.ignore()
+                return
+        super().closeEvent(event)
 
     def append_log(self, message: str) -> None:
         if not message:
@@ -538,15 +684,16 @@ class MainWindow(QMainWindow):
         scrollbar.setValue(scrollbar.maximum())
 
     def open_csv(self) -> None:
-        path = Path(self.output_csv.text()).expanduser()
-        if not path.exists():
+        path = Path(self.output_csv.text()).expanduser().resolve()
+        if not path.is_file():
             QMessageBox.information(self, "CSV not found", "No CSV has been written yet.")
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            QMessageBox.warning(self, "Could not open CSV", f"Open this file in a spreadsheet app:\n{path}")
 
     def export_csv(self) -> None:
         source = Path(self.output_csv.text()).expanduser()
-        if not source.exists():
+        if not source.is_file():
             QMessageBox.information(self, "CSV not found", "No CSV has been written yet.")
             return
         target, _selected_filter = QFileDialog.getSaveFileName(
@@ -640,6 +787,9 @@ class MainWindow(QMainWindow):
                 font-size: 24px;
                 font-weight: 700;
             }
+            QLabel {
+                background: transparent;
+            }
             QLabel#subtitle, QLabel#metadataLabel, QLabel#hintLabel {
                 color: #566273;
             }
@@ -658,10 +808,40 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
+    parser = argparse.ArgumentParser(description="ADTRAN Firmware Upgrader")
+    parser.add_argument("--smoke-test", metavar="REPORT", help="Check app startup and write a JSON report without accessing devices or saved credentials.")
+    args = parser.parse_args()
+    app = QApplication([sys.argv[0]])
     app.setApplicationName("ADTRAN Firmware Upgrader")
+    app.setApplicationVersion(__version__)
     app.setOrganizationName("FirmwareTools")
     app.setWindowIcon(app_icon())
+    if args.smoke_test:
+        with tempfile.TemporaryDirectory(prefix="adtran-smoke-") as directory:
+            store = SettingsStore(QSettings(str(Path(directory) / "settings.ini"), QSettings.IniFormat))
+            window = MainWindow(store)
+            window.show()
+
+            def finish_smoke_test():
+                report = {
+                    "version": __version__,
+                    "window_constructed": window.isVisible(),
+                    "icon_loaded": not window.windowIcon().isNull(),
+                    "credential_backend_available": store.keyring_available(),
+                    "frozen": bool(getattr(sys, "frozen", False)),
+                }
+                report["ok"] = all(report[key] for key in (
+                    "window_constructed", "icon_loaded", "credential_backend_available"
+                ))
+                try:
+                    Path(args.smoke_test).write_text(json.dumps(report, indent=2), encoding="utf-8")
+                except OSError:
+                    app.exit(1)
+                    return
+                app.exit(0 if report["ok"] else 1)
+
+            QTimer.singleShot(100, finish_smoke_test)
+            return app.exec()
     window = MainWindow()
     window.show()
     return app.exec()

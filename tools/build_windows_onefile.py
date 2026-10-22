@@ -31,6 +31,7 @@ HIDDEN_IMPORTS = [
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
+    "PySide6.QtNetwork",
 ]
 
 
@@ -47,6 +48,13 @@ def build_command() -> list[str]:
         "--clean",
         "--onefile",
         "--windowed",
+        "--noupx",
+        "--distpath",
+        str(ROOT / "dist"),
+        "--workpath",
+        str(ROOT / "build" / "windows"),
+        "--specpath",
+        str(ROOT / "build" / "windows"),
         "--name",
         APP_NAME,
         "--icon",
@@ -55,13 +63,10 @@ def build_command() -> list[str]:
         add_data_arg(ICON_ASSETS_DIR, "assets/icon"),
     ]
 
-    if FIRMWARE_IMAGES_DIR.exists():
-        command.extend(
-            [
-                "--add-data",
-                add_data_arg(FIRMWARE_IMAGES_DIR, "firmware_images"),
-            ]
-        )
+    if FIRMWARE_IMAGES_DIR.is_dir():
+        for path in sorted(FIRMWARE_IMAGES_DIR.iterdir()):
+            if path.is_file() and not path.is_symlink() and path.suffix.lower() in {".img", ".bin"}:
+                command.extend(["--add-data", add_data_arg(path, "firmware_images")])
 
     for module_name in HIDDEN_IMPORTS:
         command.extend(["--hidden-import", module_name])
@@ -79,30 +84,32 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the PyInstaller command without running it.",
     )
-    parser.add_argument(
-        "--allow-non-windows",
-        action="store_true",
-        help="Run PyInstaller even when this script is not running on Windows.",
-    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     command = build_command()
-    print(shlex.join(command))
+    print(subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command))
 
     if args.print_only:
         return 0
 
-    if os.name != "nt" and not args.allow_non_windows:
+    if os.name != "nt":
         print(
             "Not running PyInstaller because this is not Windows. "
             "Run this helper on Windows to create dist\\ADTRAN Firmware Upgrader.exe."
         )
         return 0
 
-    subprocess.run(command, cwd=ROOT, check=True)
+    for path in (ENTRYPOINT, ICON_PATH, ICON_ASSETS_DIR / "adtran_modem_icon_256.png"):
+        if not path.is_file():
+            print(f"Missing build asset: {path}", file=sys.stderr)
+            return 1
+    try:
+        subprocess.run(command, cwd=ROOT, check=True)
+    except subprocess.CalledProcessError as exc:
+        return exc.returncode
     print(f"Built {ROOT / 'dist' / f'{APP_NAME}.exe'}")
     return 0
 
