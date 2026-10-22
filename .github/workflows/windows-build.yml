@@ -30,10 +30,10 @@ jobs:
         run: python tools/build_windows_onefile.py
       - name: Check packaged app outside the checkout
         run: python tools/check_windows_build.py
+      - name: Package operator test build
+        run: python tools/package_desktop.py
       - uses: actions/upload-artifact@v7
         with:
           name: ADTRAN-Firmware-Upgrader-Windows
-          path: |
-            dist/ADTRAN Firmware Upgrader.exe
-            packaging/OPERATOR_README.md
+          path: dist/releases/*
           if-no-files-found: error

@@ -1,5 +1,9 @@
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Unlike the native Windows platform plugin, Qt's offscreen plugin does not
+# discover system fonts. Missing glyphs otherwise give bogus layout metrics.
+if os.name == "nt":
+    os.environ.setdefault("QT_QPA_FONTDIR", os.path.join(os.environ["WINDIR"], "Fonts"))
 
 import tempfile
 import unittest
@@ -7,7 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QScrollArea
 
@@ -48,6 +52,7 @@ class GuiTests(unittest.TestCase):
         warning.assert_called_once()
 
     def test_window_fits_small_laptop_height(self):
+        self.assertTrue(QFontDatabase.families(), "Layout tests require real system fonts")
         self.window.resize(1000, 640)
         self.window.show()
         self.app.processEvents()
