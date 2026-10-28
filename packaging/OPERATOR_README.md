@@ -35,6 +35,18 @@ Keep the CSV closed in Excel while processing devices. If it becomes locked, the
 
 Wi-Fi passwords are masked in the table and logs but are included in the CSV. Store and share that file accordingly.
 
+## Notes for macOS
+
+Use the Apple Silicon package. Extract it on the Mac and copy the `.app` to a
+local Applications folder. Configure Ethernet addresses in macOS Network
+settings; entering `Local IP` in the app selects an existing address rather than
+changing the adapter. Credentials are stored in your login Keychain.
+
+Use only the package approved by IT. The initial test builds are not Developer
+ID signed or notarized; contact IT if macOS blocks the application. Permit the
+firmware transfer on the Ethernet connection when required by the company
+firewall policy.
+
 ## Troubleshooting
 
 - If Ethernet is not detected, select the connected adapter manually and confirm the device IP.

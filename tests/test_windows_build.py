@@ -7,6 +7,16 @@ from tools import build_windows_onefile as build
 
 
 class WindowsBuildTests(unittest.TestCase):
+    def test_build_path_excludes_unrelated_native_libraries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            windows = Path(directory) / "Windows"
+            with patch.dict(build.os.environ, {"PATH": "unrelated-native-libraries", "SystemRoot": str(windows)}):
+                env = build.build_environment()
+                self.assertEqual(build.os.environ["PATH"], "unrelated-native-libraries")
+            self.assertNotIn("unrelated-native-libraries", env["PATH"])
+            self.assertIn(str(windows / "System32"), env["PATH"].split(build.os.pathsep))
+            self.assertIn(str(Path(build.sys.executable).parent), env["PATH"].split(build.os.pathsep))
+
     def test_build_does_not_embed_csv_credentials_or_unrelated_files(self):
         with tempfile.TemporaryDirectory(prefix="firmware with spaces ") as directory:
             root = Path(directory)

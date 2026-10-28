@@ -95,6 +95,12 @@ pyinstaller adtran_gui.spec
 
 This produces `dist/ADTRAN Firmware Upgrader.app`.
 
+For the company Apple Silicon package, use native arm64 Python 3.11 on an Apple
+Silicon Mac. Then run `python tools/check_macos_build.py` to verify the bundle's
+architecture, signature integrity and startup outside the checkout. The
+`Apple Silicon desktop build` workflow does this on a macOS 15 arm64 runner.
+Its ad-hoc signature is not Developer ID signing or Apple notarization.
+
 For Windows, run the onefile helper on a Windows machine or VM:
 
 ```powershell
@@ -102,9 +108,14 @@ py -3.11 -m venv venv
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
 .\venv\Scripts\python.exe tools\build_windows_onefile.py
 .\venv\Scripts\python.exe tools\check_windows_build.py
+.\venv\Scripts\python.exe tools\package_desktop.py
 ```
 
 This produces a single executable at `dist\ADTRAN Firmware Upgrader.exe`.
+
+The Windows helper limits the build subprocess's DLL search path to Python and
+Windows directories. This prevents tools elsewhere on `PATH` (for example,
+Poppler or Conda) from contributing incompatible ICU/runtime DLLs to the app.
 
 The intended Windows release target is Windows 10/11 x64. Build with 64-bit Python on Windows; PyInstaller does not cross-compile a Windows executable from macOS. Operators do not need Python installed. Build files stay in `build/windows`; the macOS spec is not overwritten.
 
@@ -117,6 +128,15 @@ See `packaging/OPERATOR_README.md` for the short guide to ship with the app.
 The `Windows desktop build` GitHub Actions workflow runs tests, builds the `.exe`, launches it from a temporary directory with a startup check, and uploads the executable and operator guide. It does not flash hardware or publish a release. A clean CI checkout has no bundled firmware because `firmware_images` is ignored.
 
 Before release, complete the hardware and Windows checks in [the release checklist](packaging/WINDOWS_RELEASE_CHECKLIST.md). A successful build or startup check does not verify the SSH commands against a physical device.
+
+On either supported build platform, `python tools/package_desktop.py` creates a
+versioned test ZIP and SHA-256 checksum in `dist/releases`. It includes only the
+app, operator/test-build guides, build information and file checksums. On macOS,
+the ZIP is made with `ditto` to preserve bundle permissions and symlinks. Both CI
+workflows upload these archives. Supply approved firmware separately in the
+internal company share; do not upload company firmware or device records to
+the public repository. See [desktop release preparation](packaging/DESKTOP_RELEASE.md)
+for the remaining operator acceptance steps.
 
 ## App icon
 
